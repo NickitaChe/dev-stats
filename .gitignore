@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.dev.vars
+.wrangler/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dev-stats.config.json
+.DS_Store

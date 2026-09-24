@@ -1,0 +1,30 @@
+{
+  "roots": [
+    "G:\\repos",
+    "G:\\projects"
+  ],
+  "authors": [
+    {
+      "name": "Chegodaev Nickita"
+    },
+    {
+      "name": "NickitaChe"
+    }
+  ],
+  "excludeDirectories": [
+    ".git",
+    ".idea",
+    ".vscode",
+    ".vs",
+    "node_modules",
+    "bin",
+    "obj",
+    "dist",
+    "build",
+    "vendor"
+  ],
+  "includeMerges": false,
+  "includeRepositories": false,
+  "repositoryAliases": {},
+  "output": "public/data/stats.json"
+}

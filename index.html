@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#300a24" />
+    <meta
+      name="description"
+      content="Nickita Che — local Git development statistics."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>dev-stats — Nickita Che</title>
+  </head>
+  <body>
+    <main class="shell" aria-label="dev-stats terminal">
+      <section class="terminal-window">
+        <header class="terminal-titlebar">
+          <div class="window-controls" aria-hidden="true">
+            <span class="window-control window-control--close"></span>
+            <span class="window-control window-control--minimize"></span>
+            <span class="window-control window-control--maximize"></span>
+          </div>
+          <div class="terminal-title">nickitache@nickitache: ~</div>
+          <div class="titlebar-spacer" aria-hidden="true"></div>
+        </header>
+
+        <div class="terminal" id="terminal" aria-live="polite">
+          <div class="terminal-line command-line">
+            <span class="prompt-user">nickitache@nickitache</span><span class="prompt-punctuation">:</span><span class="prompt-path">~</span><span class="prompt-punctuation">$</span>
+            <span class="command">dev-stats run</span>
+          </div>
+
+          <div id="output"></div>
+
+          <div class="terminal-line final-prompt" id="final-prompt" hidden>
+            <span class="prompt-user">nickitache@nickitache</span><span class="prompt-punctuation">:</span><span class="prompt-path">~</span><span class="prompt-punctuation">$</span>
+            <span class="cursor" aria-hidden="true"></span>
+          </div>
+        </div>
+      </section>
+
+      <p class="api-note">
+        public API: <a href="/api/stats">/api/stats</a>
+      </p>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

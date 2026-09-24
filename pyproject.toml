@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nickitache-dev-stats"
+version = "0.1.0"
+description = "Local Git statistics collector for stats.nickitache.com"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Nickita Che" }
+]
+dependencies = []
+
+[project.scripts]
+dev-stats = "collector.dev_stats:main"
+
+[tool.setuptools.packages.find]
+include = ["collector*"]
