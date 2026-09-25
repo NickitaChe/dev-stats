@@ -127,12 +127,18 @@ const buildLines = (stats: StatsPayload): OutputLine[] => {
   const appendGroups = (label: string, groups: GroupStats[]): void => {
     if (groups.length === 0) return;
 
+    const nameWidth = 23;
+    const commitsWidth = 8;
+
     lines.push({ content: '', tone: 'normal' });
-    lines.push({ label, content: 'commits      lines', tone: 'muted' });
+    lines.push({
+      content: `${label.padEnd(nameWidth)} ${'commits'.padStart(commitsWidth)}    lines`,
+      tone: 'muted'
+    });
     for (const group of groups) {
       lines.push({
         content:
-          `${group.name.padEnd(23)} ${String(number.format(group.commits)).padStart(8)}    ` +
+          `${group.name.padEnd(nameWidth)} ${String(number.format(group.commits)).padStart(commitsWidth)}    ` +
           `+${number.format(group.linesAdded)} / -${number.format(group.linesDeleted)}`,
         tone: 'normal'
       });
@@ -143,13 +149,19 @@ const buildLines = (stats: StatsPayload): OutputLine[] => {
   appendGroups('[categories]', stats.categories ?? []);
 
   if (recentYears.length > 0) {
+    const yearWidth = 6;
+    const commitsWidth = 8;
+
     lines.push({ content: '', tone: 'normal' });
-    lines.push({ label: '[year]', content: 'commits      lines', tone: 'muted' });
+    lines.push({
+      content: `${'[year]'.padEnd(yearWidth)} ${'commits'.padStart(commitsWidth)}    lines`,
+      tone: 'muted'
+    });
 
     for (const year of recentYears) {
       lines.push({
         content:
-          `${year.year}    ${String(number.format(year.commits)).padStart(8)}    ` +
+          `${year.year.padEnd(yearWidth)} ${String(number.format(year.commits)).padStart(commitsWidth)}    ` +
           `+${number.format(year.linesAdded)} / -${number.format(year.linesDeleted)}`,
         tone: 'normal'
       });
