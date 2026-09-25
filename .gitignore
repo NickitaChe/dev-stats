@@ -1,9 +1,12 @@
 node_modules/
 dist/
+.codex/
+public/data/stats.json
 .dev.vars
 .wrangler/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 venv/
 dev-stats.config.json

@@ -5,10 +5,22 @@
   ],
   "authors": [
     {
+      "name": "NickitaChe"
+    },
+    {
+      "name": "Nickita Chegodaev"
+    },
+    {
       "name": "Chegodaev Nickita"
     },
     {
-      "name": "NickitaChe"
+      "name": "nickitachegodaev"
+    },
+    {
+      "name": "Nikita Chegodaev"
+    },
+    {
+      "name": "NickChe"
     }
   ],
   "excludeDirectories": [
@@ -25,6 +37,38 @@
   ],
   "includeMerges": false,
   "includeRepositories": false,
-  "repositoryAliases": {},
-  "output": "public/data/stats.json"
+  "projectMappings": [
+    {
+      "project": "Flatform",
+      "repositories": [
+        "Platforma"
+      ]
+    },
+    {
+      "project": "Marmelad Platform",
+      "repositories": [
+        "marmelad-platform-api",
+        "marmelad-platform-web",
+        "G:\\projects\\marmelad-platform-infrastructure"
+      ]
+    },
+    {
+      "project": "LaL",
+      "repositories": [
+        "LocalAgentLab"
+      ]
+    },
+    {
+      "project": "The Drowned Frontier",
+      "repositories": [
+        "extraction game",
+        "Game-asset-factory"
+      ]
+    }
+  ],
+  "workRepositories": [
+    "G:\\work\\client-repository",
+    "internal-tools"
+  ],
+  "output": ".codex/stats.json"
 }

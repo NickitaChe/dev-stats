@@ -2,8 +2,13 @@ interface AssetBinding {
   fetch(request: Request): Promise<Response>;
 }
 
+interface StatsBinding {
+  get<T>(key: string, type: 'json'): Promise<T | null>;
+}
+
 interface Env {
   ASSETS: AssetBinding;
+  STATS: StatsBinding;
 }
 
 interface StatsPayload {
@@ -42,23 +47,12 @@ const text = (value: string, status = 200): Response => {
   return new Response(value, { status, headers });
 };
 
-const readStats = async (request: Request, env: Env): Promise<StatsPayload> => {
-  const assetUrl = new URL(request.url);
-  assetUrl.pathname = '/data/stats.json';
-  assetUrl.search = '';
-
-  const response = await env.ASSETS.fetch(
-    new Request(assetUrl.toString(), {
-      method: 'GET',
-      headers: request.headers
-    })
-  );
-
-  if (!response.ok) {
-    throw new Error(`stats asset returned HTTP ${response.status}`);
+const readStats = async (env: Env): Promise<StatsPayload> => {
+  const stats = await env.STATS.get<StatsPayload>('stats:current', 'json');
+  if (!stats) {
+    throw new Error('statistics have not been published yet');
   }
-
-  return await response.json() as StatsPayload;
+  return stats;
 };
 
 const apiIndex = (): Response =>
@@ -96,7 +90,7 @@ const worker = {
 
     if (url.pathname === '/api/stats') {
       try {
-        return json(await readStats(request, env));
+        return json(await readStats(env));
       } catch (error) {
         return json(
           {
@@ -112,7 +106,7 @@ const worker = {
       const metric = decodeURIComponent(url.pathname.slice('/api/stats/'.length));
 
       try {
-        const stats = await readStats(request, env);
+        const stats = await readStats(env);
 
         if (metric === 'summary') {
           return json({

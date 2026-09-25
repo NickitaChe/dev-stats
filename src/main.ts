@@ -11,6 +11,14 @@ interface YearStats extends PeriodStats {
   year: string;
 }
 
+interface GroupStats extends PeriodStats {
+  name: string;
+  repositories: number;
+  activeDays: number;
+  firstCommitAt: string | null;
+  lastCommitAt: string | null;
+}
+
 interface StatsPayload {
   schemaVersion: number;
   generatedAt: string | null;
@@ -27,9 +35,14 @@ interface StatsPayload {
   };
   byYear: YearStats[];
   byMonth: Array<PeriodStats & { month: string }>;
+  projects?: GroupStats[];
+  categories?: GroupStats[];
   repositories: Array<Record<string, unknown>>;
   meta: {
     repositoryNamesPublished: boolean;
+    publicGroupingPublished?: boolean;
+    unclassifiedRepositories?: number;
+    duplicateCommitsExcluded?: number;
     scanErrors?: number;
   };
 }
@@ -68,25 +81,19 @@ const formatDate = (value: string | null): string => {
 };
 
 const loadStats = async (): Promise<StatsPayload> => {
-  const endpoints = ['/api/stats', '/data/stats.json'];
-
-  let lastError: unknown;
-
-  for (const endpoint of endpoints) {
+  const endpoint = '/api/stats';
+  const response = await fetch(endpoint, { cache: 'no-store' });
+  if (!response.ok) {
+    let message = `${endpoint}: HTTP ${response.status}`;
     try {
-      const response = await fetch(endpoint, { cache: 'no-store' });
-      if (!response.ok) {
-        throw new Error(`${endpoint}: HTTP ${response.status}`);
-      }
-      return await response.json() as StatsPayload;
-    } catch (error) {
-      lastError = error;
+      const body = await response.json() as { message?: string };
+      message = body.message ?? message;
+    } catch {
+      // Keep the HTTP status when the error response is not JSON.
     }
+    throw new Error(message);
   }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error('Unable to load statistics');
+  return await response.json() as StatsPayload;
 };
 
 const buildLines = (stats: StatsPayload): OutputLine[] => {
@@ -116,6 +123,25 @@ const buildLines = (stats: StatsPayload): OutputLine[] => {
   ];
 
   const recentYears = stats.byYear.slice(-6);
+
+  const appendGroups = (label: string, groups: GroupStats[]): void => {
+    if (groups.length === 0) return;
+
+    lines.push({ content: '', tone: 'normal' });
+    lines.push({ label, content: 'commits      lines', tone: 'muted' });
+    for (const group of groups) {
+      lines.push({
+        content:
+          `${group.name.padEnd(23)} ${String(number.format(group.commits)).padStart(8)}    ` +
+          `+${number.format(group.linesAdded)} / -${number.format(group.linesDeleted)}`,
+        tone: 'normal'
+      });
+    }
+  };
+
+  appendGroups('[projects]', stats.projects ?? []);
+  appendGroups('[categories]', stats.categories ?? []);
+
   if (recentYears.length > 0) {
     lines.push({ content: '', tone: 'normal' });
     lines.push({ label: '[year]', content: 'commits      lines', tone: 'muted' });
@@ -135,6 +161,14 @@ const buildLines = (stats: StatsPayload): OutputLine[] => {
       label: '[warn]',
       content: `skipped repositories: ${stats.meta.scanErrors}`,
       tone: 'warning'
+    });
+  }
+
+  if ((stats.meta.duplicateCommitsExcluded ?? 0) > 0) {
+    lines.push({
+      label: '[dedupe]',
+      content: `duplicate commit hashes excluded: ${number.format(stats.meta.duplicateCommitsExcluded ?? 0)}`,
+      tone: 'muted'
     });
   }
 

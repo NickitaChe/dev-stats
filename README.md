@@ -12,9 +12,26 @@ The collector scans Git history on your own machine and publishes **aggregated s
 - active days;
 - first / last matching commit;
 - totals grouped by month and year;
-- optional per-repository totals.
+- public-safe totals grouped into projects and categories.
 
-By default repository names are **not** written to the public JSON. This avoids leaking names of private/work repositories.
+Commit hashes are deduplicated across all scanned repositories. A repeated hash
+contributes its commit, dates, and numstat only once. Repeated hashes must stay
+within the same public group; a hash shared by differently classified projects
+is treated as a configuration error instead of being attributed arbitrarily.
+
+Raw repository names are **never** written to the public JSON. Known repositories
+can be mapped to one of the approved public projects; explicitly marked work
+repositories are aggregated as `Work`; everything else is aggregated as `Other`.
+
+The only accepted public project names are:
+
+- `Flatform`
+- `Marmelad Platform`
+- `LaL`
+- `The Drowned Frontier`
+
+This allowlist is enforced by the collector, so a typo or an unapproved project
+name stops collection instead of leaking a repository name.
 
 ## Local collector
 
@@ -35,7 +52,7 @@ Create your local configuration:
 Copy-Item dev-stats.config.example.json dev-stats.config.json
 ```
 
-Edit the roots and author identities, then run:
+Edit the roots, author identities, and repository grouping, then run:
 
 ```powershell
 dev-stats run
@@ -44,24 +61,73 @@ dev-stats run
 The default output is:
 
 ```text
-public/data/stats.json
+.codex/stats.json
 ```
+
+The snapshot is ignored by Git. Real statistics are uploaded directly to
+Cloudflare KV and are never included in the repository or static web bundle.
 
 Useful overrides:
 
 ```powershell
 dev-stats run --root G:\repos --author-name "Nickita Che"
 dev-stats run --include-repositories
-dev-stats run --output public/data/stats.json
+dev-stats run --output .codex/stats.json
 ```
 
-After collection, commit only the generated aggregate:
+## Public project grouping
+
+Each repository selector is either an exact repository directory name or an
+exact path. Multiple selectors can map to the same logical project:
+
+```json
+{
+  "projectMappings": [
+    {
+      "project": "Marmelad Platform",
+      "repositories": [
+        "marmelad-platform-api",
+        "marmelad-platform-web",
+        "G:\\projects\\marmelad-platform-infrastructure"
+      ]
+    }
+  ],
+  "workRepositories": [
+    "G:\\work\\client-repository",
+    "internal-tools"
+  ]
+}
+```
+
+Matching is case-insensitive. A selector containing `/` or `\\` is resolved as
+a path relative to the configuration file; any other selector matches the
+repository directory name. A repository may match only one project/category.
+
+The generated JSON contains additive `projects` and `categories` arrays. Each
+entry is an aggregate and includes its physical repository count. Existing
+totals, monthly/yearly data, and metric API routes retain their shape. The
+legacy `repositories` array remains empty by default; `includeRepositories` or
+`--include-repositories` fills it with the same public-safe groups, never raw
+repository names. Legacy `repositoryAliases` config is accepted only when the
+target is one of the four projects, `Work`, or `Other`.
+`meta.duplicateCommitsExcluded` reports how many repeated commit hashes were
+removed from the aggregate.
+
+## Publish statistics
+
+`publish` validates the snapshot before upload. It refuses payloads containing
+repository details, unknown public groups, scan errors, or an unsupported
+schema:
 
 ```powershell
-git add public/data/stats.json
-git commit -m "data: update dev stats"
-git push
+dev-stats run
+dev-stats publish --dry-run
+dev-stats publish
 ```
+
+The upload writes `.codex/stats.json` to the `stats:current` key of the `STATS`
+Workers KV binding through the locally authenticated Wrangler CLI. No upload
+credential or real statistics file is committed to Git.
 
 ## Web
 
@@ -71,8 +137,13 @@ Local development:
 
 ```powershell
 npm install
-npm run dev
+dev-stats run
+dev-stats publish --local
+npm run worker:dev
 ```
+
+`npm run dev` still starts a UI-only Vite server, but API-backed statistics
+require `npm run worker:dev`.
 
 Checks:
 
@@ -116,21 +187,35 @@ const commits = await fetch(
 
 ## Cloudflare deployment
 
-This repository is prepared for **Cloudflare Workers + Static Assets**.
+This repository is prepared for **Cloudflare Workers + Static Assets + Workers
+KV**. The application bundle and statistics are deployed independently.
 
-Build:
+Authenticate Wrangler once:
 
-```text
-npm run build
+```powershell
+npx wrangler login
 ```
 
-Deploy:
+Deploy the application:
 
-```text
+```powershell
 npm run deploy
 ```
 
-The Worker serves API routes and Vite's `dist/` as static assets.
+The first deployment automatically provisions the `STATS` KV namespace and
+writes its generated namespace ID into `wrangler.jsonc`. Commit that binding ID;
+it is a public resource identifier, not a credential.
+
+Generate and upload statistics separately whenever a new snapshot is needed:
+
+```powershell
+dev-stats run
+dev-stats publish
+```
+
+The Worker serves API routes from the `stats:current` KV value and Vite's
+`dist/` as static assets. A newly written KV value may take roughly a minute to
+become visible at every Cloudflare location.
 
 After creating the Worker, attach:
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -26,12 +28,32 @@ DEFAULT_EXCLUDED_DIRS = {
     ".venv",
     "venv",
 }
+PUBLIC_PROJECT_NAMES = (
+    "Flatform",
+    "Marmelad Platform",
+    "LaL",
+    "The Drowned Frontier",
+)
+PUBLIC_CATEGORY_NAMES = ("Work", "Other")
+STATS_KV_KEY = "stats:current"
 
 
 @dataclass(frozen=True)
 class AuthorIdentity:
     name: str | None = None
     email: str | None = None
+
+
+@dataclass(frozen=True)
+class RepositorySelector:
+    names: frozenset[str] = frozenset()
+    paths: frozenset[str] = frozenset()
+
+    def matches(self, repo: Path) -> bool:
+        return (
+            repo.name.casefold() in self.names
+            or str(repo.resolve()).casefold() in self.paths
+        )
 
 
 class Colors:
@@ -173,6 +195,124 @@ def parse_identities(config: dict[str, Any], args: argparse.Namespace) -> list[A
     return identities
 
 
+def parse_repository_selector(
+    values: Any,
+    base_dir: Path,
+    field_name: str,
+) -> RepositorySelector:
+    if values is None:
+        return RepositorySelector()
+    if not isinstance(values, list):
+        raise ValueError(f"{field_name} must be an array of repository names or paths.")
+
+    names: set[str] = set()
+    paths: set[str] = set()
+
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name}[{index}] must be a non-empty string.")
+
+        selector = value.strip()
+        if Path(selector).is_absolute() or any(mark in selector for mark in ("/", "\\")):
+            paths.add(str(resolve_path(selector, base_dir)).casefold())
+        else:
+            names.add(selector.casefold())
+
+    return RepositorySelector(frozenset(names), frozenset(paths))
+
+
+def merge_selectors(
+    left: RepositorySelector,
+    right: RepositorySelector,
+) -> RepositorySelector:
+    return RepositorySelector(left.names | right.names, left.paths | right.paths)
+
+
+def parse_grouping(
+    config: dict[str, Any],
+    base_dir: Path,
+) -> tuple[dict[str, RepositorySelector], RepositorySelector]:
+    mappings = config.get("projectMappings", [])
+    if not isinstance(mappings, list):
+        raise ValueError("projectMappings must be an array.")
+
+    projects = {name: RepositorySelector() for name in PUBLIC_PROJECT_NAMES}
+    work = parse_repository_selector(
+        config.get("workRepositories", []),
+        base_dir,
+        "workRepositories",
+    )
+
+    for index, item in enumerate(mappings):
+        if not isinstance(item, dict):
+            raise ValueError(f"projectMappings[{index}] must be an object.")
+
+        project = item.get("project")
+        if project not in PUBLIC_PROJECT_NAMES:
+            allowed = ", ".join(PUBLIC_PROJECT_NAMES)
+            raise ValueError(
+                f"projectMappings[{index}].project must be one of: {allowed}."
+            )
+
+        selector = parse_repository_selector(
+            item.get("repositories", []),
+            base_dir,
+            f"projectMappings[{index}].repositories",
+        )
+        projects[project] = merge_selectors(projects[project], selector)
+
+    # Keep old configurations useful, but only allow aliases to public-safe groups.
+    aliases = config.get("repositoryAliases", {})
+    if not isinstance(aliases, dict):
+        raise ValueError("repositoryAliases must be an object.")
+
+    for repository, group in aliases.items():
+        if not isinstance(repository, str) or not isinstance(group, str):
+            raise ValueError("repositoryAliases keys and values must be strings.")
+
+        selector = parse_repository_selector(
+            [repository],
+            base_dir,
+            f"repositoryAliases[{repository!r}]",
+        )
+        if group in PUBLIC_PROJECT_NAMES:
+            projects[group] = merge_selectors(projects[group], selector)
+        elif group == "Work":
+            work = merge_selectors(work, selector)
+        elif group != "Other":
+            allowed = ", ".join((*PUBLIC_PROJECT_NAMES, *PUBLIC_CATEGORY_NAMES))
+            raise ValueError(
+                f"repositoryAliases[{repository!r}] must map to one of: {allowed}."
+            )
+
+    return projects, work
+
+
+def classify_repository(
+    repo: Path,
+    project_selectors: dict[str, RepositorySelector],
+    work_selector: RepositorySelector,
+) -> str:
+    project_matches = [
+        project
+        for project, selector in project_selectors.items()
+        if selector.matches(repo)
+    ]
+    is_work = work_selector.matches(repo)
+
+    if len(project_matches) > 1 or (project_matches and is_work):
+        matches = [*project_matches, *(["Work"] if is_work else [])]
+        raise ValueError(
+            f"Repository {repo} matches multiple public groups: {', '.join(matches)}."
+        )
+
+    if project_matches:
+        return project_matches[0]
+    if is_work:
+        return "Work"
+    return "Other"
+
+
 def matches_author(name: str, email: str, identities: list[AuthorIdentity]) -> bool:
     normalized_name = name.strip().casefold()
     normalized_email = email.strip().casefold()
@@ -202,12 +342,25 @@ def scan_repository(
     repo: Path,
     identities: list[AuthorIdentity],
     include_merges: bool,
-) -> dict[str, Any] | None:
+    seen_commit_groups: dict[str, str],
+    group_name: str,
+) -> tuple[dict[str, Any] | None, int]:
+    author_patterns = {
+        pattern
+        for identity in identities
+        for pattern in (
+            f"^{re.escape(identity.name)} <" if identity.name else None,
+            f"<{re.escape(identity.email)}>$" if identity.email else None,
+        )
+        if pattern is not None
+    }
     command = [
         "log",
         "--all",
+        "--extended-regexp",
+        *(f"--author={pattern}" for pattern in sorted(author_patterns)),
         "--date=iso-strict",
-        f"--pretty=format:{COMMIT_PREFIX}%x1f%H%x1f%an%x1f%ae%x1f%aI",
+        f"--pretty=format:{COMMIT_PREFIX}%H%x1f%an%x1f%ae%x1f%aI",
         "--numstat",
     ]
     if not include_merges:
@@ -223,6 +376,8 @@ def scan_repository(
     last_commit: datetime | None = None
     by_month: dict[str, dict[str, int]] = defaultdict(empty_period)
     by_year: dict[str, dict[str, int]] = defaultdict(empty_period)
+    repository_hashes: set[str] = set()
+    duplicate_commits = 0
 
     current_matches = False
     current_month: str | None = None
@@ -238,10 +393,25 @@ def scan_repository(
                 current_matches = False
                 continue
 
-            _commit_sha, author_name, author_email, authored_at = parts[:4]
+            commit_sha, author_name, author_email, authored_at = parts[:4]
             current_matches = matches_author(author_name, author_email, identities)
 
             if not current_matches:
+                current_month = None
+                current_year = None
+                continue
+
+            existing_group = seen_commit_groups.get(commit_sha)
+            if existing_group is None and commit_sha in repository_hashes:
+                existing_group = group_name
+            if existing_group is not None:
+                if existing_group != group_name:
+                    raise ValueError(
+                        f"Commit {commit_sha} occurs in both {existing_group} "
+                        f"and {group_name}; adjust repository grouping."
+                    )
+                duplicate_commits += 1
+                current_matches = False
                 current_month = None
                 current_year = None
                 continue
@@ -252,6 +422,7 @@ def scan_repository(
                 current_matches = False
                 continue
 
+            repository_hashes.add(commit_sha)
             commits += 1
             day = moment.date().isoformat()
             current_month = moment.strftime("%Y-%m")
@@ -291,22 +462,30 @@ def scan_repository(
             by_year[current_year]["linesAdded"] += added
             by_year[current_year]["linesDeleted"] += deleted
 
-    if commits == 0:
-        return None
+    if commits == 0 and duplicate_commits == 0:
+        return None, 0
 
-    return {
-        "path": repo,
-        "name": repo.name,
-        "commits": commits,
-        "linesAdded": additions,
-        "linesDeleted": deletions,
-        "netLines": additions - deletions,
-        "activeDays": active_days,
-        "firstCommit": first_commit,
-        "lastCommit": last_commit,
-        "byMonth": by_month,
-        "byYear": by_year,
-    }
+    seen_commit_groups.update(
+        (commit_sha, group_name)
+        for commit_sha in repository_hashes
+    )
+
+    return (
+        {
+            "path": repo,
+            "name": repo.name,
+            "commits": commits,
+            "linesAdded": additions,
+            "linesDeleted": deletions,
+            "netLines": additions - deletions,
+            "activeDays": active_days,
+            "firstCommit": first_commit,
+            "lastCommit": last_commit,
+            "byMonth": by_month,
+            "byYear": by_year,
+        },
+        duplicate_commits,
+    )
 
 
 def merge_periods(
@@ -324,10 +503,73 @@ def iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def summarize_results(name: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    active_days: set[str] = set()
+    first_commit: datetime | None = None
+    last_commit: datetime | None = None
+
+    for item in results:
+        active_days.update(item["activeDays"])
+        first = item["firstCommit"]
+        last = item["lastCommit"]
+        if first is not None and (first_commit is None or first < first_commit):
+            first_commit = first
+        if last is not None and (last_commit is None or last > last_commit):
+            last_commit = last
+
+    additions = sum(item["linesAdded"] for item in results)
+    deletions = sum(item["linesDeleted"] for item in results)
+
+    return {
+        "name": name,
+        "repositories": len(results),
+        "commits": sum(item["commits"] for item in results),
+        "linesAdded": additions,
+        "linesDeleted": deletions,
+        "netLines": additions - deletions,
+        "activeDays": len(active_days),
+        "firstCommitAt": iso_or_none(first_commit),
+        "lastCommitAt": iso_or_none(last_commit),
+    }
+
+
+def group_results(
+    results: list[dict[str, Any]],
+    project_selectors: dict[str, RepositorySelector],
+    work_selector: RepositorySelector,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    projects: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    categories: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for item in results:
+        group_name = classify_repository(
+            item["path"],
+            project_selectors,
+            work_selector,
+        )
+        if group_name in PUBLIC_PROJECT_NAMES:
+            projects[group_name].append(item)
+        else:
+            categories[group_name].append(item)
+
+    project_stats = [
+        summarize_results(name, projects[name])
+        for name in PUBLIC_PROJECT_NAMES
+        if projects[name]
+    ]
+    category_stats = [
+        summarize_results(name, categories[name])
+        for name in PUBLIC_CATEGORY_NAMES
+        if categories[name]
+    ]
+    return project_stats, category_stats
+
+
 def build_payload(
     results: list[dict[str, Any]],
     include_repositories: bool,
-    aliases: dict[str, str],
+    project_selectors: dict[str, RepositorySelector],
+    work_selector: RepositorySelector,
 ) -> dict[str, Any]:
     commits = sum(item["commits"] for item in results)
     additions = sum(item["linesAdded"] for item in results)
@@ -351,22 +593,12 @@ def build_payload(
         if last is not None and (last_commit is None or last > last_commit):
             last_commit = last
 
-    repositories: list[dict[str, Any]] = []
-    if include_repositories:
-        for item in sorted(results, key=lambda value: value["commits"], reverse=True):
-            raw_name = item["name"]
-            repositories.append(
-                {
-                    "name": aliases.get(raw_name, raw_name),
-                    "commits": item["commits"],
-                    "linesAdded": item["linesAdded"],
-                    "linesDeleted": item["linesDeleted"],
-                    "netLines": item["netLines"],
-                    "activeDays": len(item["activeDays"]),
-                    "firstCommitAt": iso_or_none(item["firstCommit"]),
-                    "lastCommitAt": iso_or_none(item["lastCommit"]),
-                }
-            )
+    projects, categories = group_results(results, project_selectors, work_selector)
+    public_groups = sorted(
+        [*projects, *categories],
+        key=lambda value: value["commits"],
+        reverse=True,
+    )
 
     return {
         "schemaVersion": 1,
@@ -398,9 +630,22 @@ def build_payload(
             }
             for period, values in sorted(by_month.items())
         ],
-        "repositories": repositories,
+        "projects": projects,
+        "categories": categories,
+        # Compatibility field: it can be opted into, but now contains only
+        # public-safe aggregated groups and never raw repository names.
+        "repositories": public_groups if include_repositories else [],
         "meta": {
-            "repositoryNamesPublished": include_repositories,
+            "repositoryNamesPublished": False,
+            "publicGroupingPublished": True,
+            "unclassifiedRepositories": next(
+                (
+                    item["repositories"]
+                    for item in categories
+                    if item["name"] == "Other"
+                ),
+                0,
+            ),
         },
     }
 
@@ -411,6 +656,7 @@ def format_number(value: int) -> str:
 
 def print_summary(payload: dict[str, Any], output_path: Path) -> None:
     totals = payload["totals"]
+    duplicate_commits = payload["meta"].get("duplicateCommitsExcluded", 0)
 
     print()
     print(f"{C.green}[done]{C.reset} statistics collected")
@@ -423,7 +669,192 @@ def print_summary(payload: dict[str, Any], output_path: Path) -> None:
     )
     print(f"  {C.cyan}net lines{C.reset}      {format_number(totals['netLines'])}")
     print(f"  {C.cyan}active days{C.reset}   {format_number(totals['activeDays'])}")
+    if duplicate_commits:
+        print(
+            f"  {C.cyan}deduplicated{C.reset}  "
+            f"{format_number(duplicate_commits)} commits"
+        )
     print(f"{C.dim}written: {output_path}{C.reset}")
+
+
+def validate_public_payload(payload: dict[str, Any]) -> None:
+    expected_keys = {
+        "schemaVersion",
+        "generatedAt",
+        "source",
+        "totals",
+        "byYear",
+        "byMonth",
+        "projects",
+        "categories",
+        "repositories",
+        "meta",
+    }
+    unexpected_keys = set(payload) - expected_keys
+    if unexpected_keys:
+        raise ValueError(
+            "Statistics payload contains unexpected top-level fields: "
+            + ", ".join(sorted(unexpected_keys))
+        )
+
+    if payload.get("schemaVersion") != 1 or payload.get("source") != "local-git":
+        raise ValueError("Statistics payload has an unsupported schema or source.")
+    generated_at = payload.get("generatedAt")
+    if not isinstance(generated_at, str):
+        raise ValueError("Statistics payload has no generatedAt value.")
+    try:
+        datetime.fromisoformat(generated_at)
+    except ValueError as exc:
+        raise ValueError("Statistics payload has an invalid generatedAt value.") from exc
+
+    totals = payload.get("totals")
+    total_fields = {
+        "repositories",
+        "commits",
+        "linesAdded",
+        "linesDeleted",
+        "netLines",
+        "activeDays",
+        "firstCommitAt",
+        "lastCommitAt",
+    }
+    if not isinstance(totals, dict) or set(totals) != total_fields:
+        raise ValueError("Statistics payload has invalid totals.")
+    for field in total_fields - {"firstCommitAt", "lastCommitAt"}:
+        if not isinstance(totals[field], int):
+            raise ValueError(f"Statistics total {field} must be an integer.")
+
+    by_year = payload.get("byYear")
+    by_month = payload.get("byMonth")
+    if not isinstance(by_year, list) or not isinstance(by_month, list):
+        raise ValueError("Statistics payload has invalid period arrays.")
+
+    metric_fields = {"commits", "linesAdded", "linesDeleted", "netLines"}
+    periods = [
+        *((item, "year") for item in by_year),
+        *((item, "month") for item in by_month),
+    ]
+    for period, label in periods:
+        if not isinstance(period, dict) or set(period) != metric_fields | {label}:
+            raise ValueError(f"Statistics payload contains invalid {label} fields.")
+        if not isinstance(period[label], str) or any(
+            not isinstance(period[field], int) for field in metric_fields
+        ):
+            raise ValueError(f"Statistics payload contains invalid {label} values.")
+
+    repositories = payload.get("repositories")
+    if repositories != []:
+        raise ValueError(
+            "The public repositories field must be empty before publication."
+        )
+
+    meta = payload.get("meta")
+    if not isinstance(meta, dict) or meta.get("repositoryNamesPublished") is not False:
+        raise ValueError("Repository names must not be published.")
+    meta_fields = {
+        "repositoryNamesPublished",
+        "publicGroupingPublished",
+        "unclassifiedRepositories",
+        "scanErrors",
+        "duplicateCommitsExcluded",
+    }
+    if set(meta) != meta_fields:
+        raise ValueError("Statistics payload contains invalid metadata fields.")
+    if meta.get("scanErrors") != 0:
+        raise ValueError("Statistics with scan errors cannot be published.")
+
+    projects = payload.get("projects")
+    categories = payload.get("categories")
+    if not isinstance(projects, list) or not isinstance(categories, list):
+        raise ValueError("Statistics payload has invalid public grouping arrays.")
+
+    project_names = {item.get("name") for item in projects if isinstance(item, dict)}
+    category_names = {item.get("name") for item in categories if isinstance(item, dict)}
+    if len(project_names) != len(projects) or not project_names.issubset(
+        PUBLIC_PROJECT_NAMES
+    ):
+        raise ValueError("Statistics payload contains a non-public project name.")
+    if len(category_names) != len(categories) or not category_names.issubset(
+        PUBLIC_CATEGORY_NAMES
+    ):
+        raise ValueError("Statistics payload contains an unsupported category name.")
+
+    group_fields = {
+        "name",
+        "repositories",
+        "commits",
+        "linesAdded",
+        "linesDeleted",
+        "netLines",
+        "activeDays",
+        "firstCommitAt",
+        "lastCommitAt",
+    }
+    for group in [*projects, *categories]:
+        if set(group) != group_fields:
+            raise ValueError("Statistics payload contains invalid public group fields.")
+
+
+def command_publish(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).resolve()
+    config = load_config(config_path)
+    base_dir = config_path.parent if config_path.exists() else Path.cwd()
+
+    input_value = args.input or config.get("output", ".codex/stats.json")
+    input_path = resolve_path(str(input_value), base_dir)
+    if not input_path.is_file():
+        raise RuntimeError(f"Statistics file does not exist: {input_path}")
+
+    payload = load_config(input_path)
+    validate_public_payload(payload)
+
+    wrangler_config = resolve_path(str(args.wrangler_config), Path.cwd())
+    if not wrangler_config.is_file():
+        raise RuntimeError(f"Wrangler configuration does not exist: {wrangler_config}")
+
+    npx = shutil.which("npx.cmd" if os.name == "nt" else "npx")
+    if npx is None:
+        raise RuntimeError("npx was not found in PATH.")
+
+    command = [
+        npx,
+        "wrangler",
+        "kv",
+        "key",
+        "put",
+        str(args.key),
+        "--binding",
+        str(args.binding),
+        "--path",
+        str(input_path),
+        "--local" if args.local else "--remote",
+        "--config",
+        str(wrangler_config),
+    ]
+
+    print(
+        f"{C.green}nickitache@nickitache{C.reset}:"
+        f"{C.cyan}~{C.reset}$ dev-stats publish",
+        flush=True,
+    )
+    print(f"{C.dim}[validate]{C.reset} public payload is safe", flush=True)
+    destination = "local KV" if args.local else "Cloudflare KV"
+    print(
+        f"{C.dim}[upload]{C.reset} {input_path} -> "
+        f"{destination} {args.binding}/{args.key}",
+        flush=True,
+    )
+
+    if args.dry_run:
+        print(f"{C.yellow}[dry-run]{C.reset} upload skipped")
+        return 0
+
+    process = subprocess.run(command, check=False)
+    if process.returncode != 0:
+        raise RuntimeError(f"Wrangler upload failed with exit code {process.returncode}.")
+
+    print(f"{C.green}[done]{C.reset} statistics published")
+    return 0
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -447,12 +878,9 @@ def command_run(args: argparse.Namespace) -> int:
     if args.include_repositories:
         include_repositories = True
 
-    aliases = {
-        str(key): str(value)
-        for key, value in config.get("repositoryAliases", {}).items()
-    }
+    project_selectors, work_selector = parse_grouping(config, base_dir)
 
-    output_value = args.output or config.get("output", "public/data/stats.json")
+    output_value = args.output or config.get("output", ".codex/stats.json")
     output_path = resolve_path(str(output_value), base_dir)
 
     print(f"{C.green}nickitache@nickitache{C.reset}:{C.cyan}~{C.reset}$ dev-stats run")
@@ -462,28 +890,52 @@ def command_run(args: argparse.Namespace) -> int:
     print(f"{C.dim}[scan]{C.reset} git repositories found: {len(repositories)}")
 
     results: list[dict[str, Any]] = []
+    seen_commit_groups: dict[str, str] = {}
+    duplicate_commits = 0
     errors = 0
 
     for index, repo in enumerate(repositories, start=1):
+        group_name = classify_repository(repo, project_selectors, work_selector)
         try:
-            result = scan_repository(repo, identities, include_merges)
+            result, repository_duplicates = scan_repository(
+                repo,
+                identities,
+                include_merges,
+                seen_commit_groups,
+                group_name,
+            )
+            duplicate_commits += repository_duplicates
             if result is None:
                 continue
 
             results.append(result)
+            duplicate_suffix = (
+                f", {format_number(repository_duplicates)} duplicate hashes excluded"
+                if repository_duplicates
+                else ""
+            )
             print(
                 f"{C.green}[ok]{C.reset} "
                 f"{index:>3}/{len(repositories):<3} "
                 f"{repo.name}: {format_number(result['commits'])} commits, "
                 f"+{format_number(result['linesAdded'])}/"
                 f"-{format_number(result['linesDeleted'])}"
+                f"{duplicate_suffix}"
             )
+        except ValueError:
+            raise
         except Exception as exc:
             errors += 1
             print(f"{C.yellow}[skip]{C.reset} {repo}: {exc}")
 
-    payload = build_payload(results, include_repositories, aliases)
+    payload = build_payload(
+        results,
+        include_repositories,
+        project_selectors,
+        work_selector,
+    )
     payload["meta"]["scanErrors"] = errors
+    payload["meta"]["duplicateCommitsExcluded"] = duplicate_commits
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="\n") as stream:
@@ -529,9 +981,49 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--include-repositories",
         action="store_true",
-        help="publish repository names and per-repository totals",
+        help="include public grouped totals in the legacy repositories field",
     )
     run_parser.set_defaults(handler=command_run)
+
+    publish_parser = subparsers.add_parser(
+        "publish",
+        help="validate and upload a generated snapshot to Cloudflare KV",
+    )
+    publish_parser.add_argument(
+        "--config",
+        default="dev-stats.config.json",
+        help="collector configuration file (default: dev-stats.config.json)",
+    )
+    publish_parser.add_argument(
+        "--input",
+        help="statistics JSON path; defaults to the configured output",
+    )
+    publish_parser.add_argument(
+        "--wrangler-config",
+        default="wrangler.jsonc",
+        help="Wrangler configuration file (default: wrangler.jsonc)",
+    )
+    publish_parser.add_argument(
+        "--binding",
+        default="STATS",
+        help="Workers KV binding name (default: STATS)",
+    )
+    publish_parser.add_argument(
+        "--key",
+        default=STATS_KV_KEY,
+        help=f"Workers KV key (default: {STATS_KV_KEY})",
+    )
+    publish_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and show the upload target without writing to Cloudflare",
+    )
+    publish_parser.add_argument(
+        "--local",
+        action="store_true",
+        help="write to Wrangler's local KV instead of Cloudflare",
+    )
+    publish_parser.set_defaults(handler=command_publish)
 
     return parser
 
