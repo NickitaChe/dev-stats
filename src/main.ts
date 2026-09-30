@@ -36,6 +36,7 @@ interface StatsPayload {
   byYear: YearStats[];
   byMonth: Array<PeriodStats & { month: string }>;
   projects?: GroupStats[];
+  tools?: GroupStats[];
   categories?: GroupStats[];
   repositories: Array<Record<string, unknown>>;
   meta: {
@@ -146,6 +147,7 @@ const buildLines = (stats: StatsPayload): OutputLine[] => {
   };
 
   appendGroups('[projects]', stats.projects ?? []);
+  appendGroups('[tools]', stats.tools ?? []);
   appendGroups('[categories]', stats.categories ?? []);
 
   if (recentYears.length > 0) {

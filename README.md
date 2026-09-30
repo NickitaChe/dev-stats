@@ -12,7 +12,7 @@ The collector scans Git history on your own machine and publishes **aggregated s
 - active days;
 - first / last matching commit;
 - totals grouped by month and year;
-- public-safe totals grouped into projects and categories.
+- public-safe totals grouped into projects, tools, and categories.
 
 Commit hashes are deduplicated across all scanned repositories. A repeated hash
 contributes its commit, dates, and numstat only once. Repeated hashes must stay
@@ -20,7 +20,7 @@ within the same public group; a hash shared by differently classified projects
 is treated as a configuration error instead of being attributed arbitrarily.
 
 Raw repository names are **never** written to the public JSON. Known repositories
-can be mapped to one of the approved public projects; explicitly marked work
+can be mapped to one of the approved public projects or tools; explicitly marked work
 repositories are aggregated as `Work`; everything else is aggregated as `Other`.
 
 The only accepted public project names are:
@@ -30,7 +30,13 @@ The only accepted public project names are:
 - `LaL`
 - `The Drowned Frontier`
 
-This allowlist is enforced by the collector, so a typo or an unapproved project
+The only accepted public tool names are:
+
+- `Avatar Generator`
+- `dev-stats`
+- `nickitache.com`
+
+These allowlists are enforced by the collector, so a typo or an unapproved public
 name stops collection instead of leaking a repository name.
 
 ## Local collector
@@ -92,6 +98,14 @@ exact path. Multiple selectors can map to the same logical project:
       ]
     }
   ],
+  "toolMappings": [
+    {
+      "tool": "Avatar Generator",
+      "repositories": [
+        "avatar-generator"
+      ]
+    }
+  ],
   "workRepositories": [
     "G:\\work\\client-repository",
     "internal-tools"
@@ -103,13 +117,13 @@ Matching is case-insensitive. A selector containing `/` or `\\` is resolved as
 a path relative to the configuration file; any other selector matches the
 repository directory name. A repository may match only one project/category.
 
-The generated JSON contains additive `projects` and `categories` arrays. Each
+The generated JSON contains additive `projects`, `tools`, and `categories` arrays. Each
 entry is an aggregate and includes its physical repository count. Existing
 totals, monthly/yearly data, and metric API routes retain their shape. The
 legacy `repositories` array remains empty by default; `includeRepositories` or
 `--include-repositories` fills it with the same public-safe groups, never raw
 repository names. Legacy `repositoryAliases` config is accepted only when the
-target is one of the four projects, `Work`, or `Other`.
+target is one of the approved projects or tools, `Work`, or `Other`.
 `meta.duplicateCommitsExcluded` reports how many repeated commit hashes were
 removed from the aggregate.
 

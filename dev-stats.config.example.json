@@ -66,6 +66,26 @@
       ]
     }
   ],
+  "toolMappings": [
+    {
+      "tool": "Avatar Generator",
+      "repositories": [
+        "avatar-generator"
+      ]
+    },
+    {
+      "tool": "dev-stats",
+      "repositories": [
+        "dev-stats"
+      ]
+    },
+    {
+      "tool": "nickitache.com",
+      "repositories": [
+        "nickitache.com"
+      ]
+    }
+  ],
   "workRepositories": [
     "G:\\work\\client-repository",
     "internal-tools"

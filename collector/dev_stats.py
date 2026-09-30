@@ -34,6 +34,11 @@ PUBLIC_PROJECT_NAMES = (
     "LaL",
     "The Drowned Frontier",
 )
+PUBLIC_TOOL_NAMES = (
+    "Avatar Generator",
+    "dev-stats",
+    "nickitache.com",
+)
 PUBLIC_CATEGORY_NAMES = ("Work", "Other")
 STATS_KV_KEY = "stats:current"
 
@@ -231,35 +236,45 @@ def merge_selectors(
 def parse_grouping(
     config: dict[str, Any],
     base_dir: Path,
-) -> tuple[dict[str, RepositorySelector], RepositorySelector]:
-    mappings = config.get("projectMappings", [])
-    if not isinstance(mappings, list):
-        raise ValueError("projectMappings must be an array.")
-
+) -> tuple[
+    dict[str, RepositorySelector],
+    dict[str, RepositorySelector],
+    RepositorySelector,
+]:
     projects = {name: RepositorySelector() for name in PUBLIC_PROJECT_NAMES}
+    tools = {name: RepositorySelector() for name in PUBLIC_TOOL_NAMES}
     work = parse_repository_selector(
         config.get("workRepositories", []),
         base_dir,
         "workRepositories",
     )
 
-    for index, item in enumerate(mappings):
-        if not isinstance(item, dict):
-            raise ValueError(f"projectMappings[{index}] must be an object.")
+    mapping_definitions = (
+        ("projectMappings", "project", PUBLIC_PROJECT_NAMES, projects),
+        ("toolMappings", "tool", PUBLIC_TOOL_NAMES, tools),
+    )
+    for field_name, name_field, allowed_names, selectors in mapping_definitions:
+        mappings = config.get(field_name, [])
+        if not isinstance(mappings, list):
+            raise ValueError(f"{field_name} must be an array.")
 
-        project = item.get("project")
-        if project not in PUBLIC_PROJECT_NAMES:
-            allowed = ", ".join(PUBLIC_PROJECT_NAMES)
-            raise ValueError(
-                f"projectMappings[{index}].project must be one of: {allowed}."
+        for index, item in enumerate(mappings):
+            if not isinstance(item, dict):
+                raise ValueError(f"{field_name}[{index}] must be an object.")
+
+            public_name = item.get(name_field)
+            if public_name not in allowed_names:
+                allowed = ", ".join(allowed_names)
+                raise ValueError(
+                    f"{field_name}[{index}].{name_field} must be one of: {allowed}."
+                )
+
+            selector = parse_repository_selector(
+                item.get("repositories", []),
+                base_dir,
+                f"{field_name}[{index}].repositories",
             )
-
-        selector = parse_repository_selector(
-            item.get("repositories", []),
-            base_dir,
-            f"projectMappings[{index}].repositories",
-        )
-        projects[project] = merge_selectors(projects[project], selector)
+            selectors[public_name] = merge_selectors(selectors[public_name], selector)
 
     # Keep old configurations useful, but only allow aliases to public-safe groups.
     aliases = config.get("repositoryAliases", {})
@@ -277,37 +292,42 @@ def parse_grouping(
         )
         if group in PUBLIC_PROJECT_NAMES:
             projects[group] = merge_selectors(projects[group], selector)
+        elif group in PUBLIC_TOOL_NAMES:
+            tools[group] = merge_selectors(tools[group], selector)
         elif group == "Work":
             work = merge_selectors(work, selector)
         elif group != "Other":
-            allowed = ", ".join((*PUBLIC_PROJECT_NAMES, *PUBLIC_CATEGORY_NAMES))
+            allowed = ", ".join(
+                (*PUBLIC_PROJECT_NAMES, *PUBLIC_TOOL_NAMES, *PUBLIC_CATEGORY_NAMES)
+            )
             raise ValueError(
                 f"repositoryAliases[{repository!r}] must map to one of: {allowed}."
             )
 
-    return projects, work
+    return projects, tools, work
 
 
 def classify_repository(
     repo: Path,
     project_selectors: dict[str, RepositorySelector],
+    tool_selectors: dict[str, RepositorySelector],
     work_selector: RepositorySelector,
 ) -> str:
-    project_matches = [
-        project
-        for project, selector in project_selectors.items()
+    public_matches = [
+        public_name
+        for public_name, selector in (*project_selectors.items(), *tool_selectors.items())
         if selector.matches(repo)
     ]
     is_work = work_selector.matches(repo)
 
-    if len(project_matches) > 1 or (project_matches and is_work):
-        matches = [*project_matches, *(["Work"] if is_work else [])]
+    if len(public_matches) > 1 or (public_matches and is_work):
+        matches = [*public_matches, *(["Work"] if is_work else [])]
         raise ValueError(
             f"Repository {repo} matches multiple public groups: {', '.join(matches)}."
         )
 
-    if project_matches:
-        return project_matches[0]
+    if public_matches:
+        return public_matches[0]
     if is_work:
         return "Work"
     return "Other"
@@ -536,19 +556,28 @@ def summarize_results(name: str, results: list[dict[str, Any]]) -> dict[str, Any
 def group_results(
     results: list[dict[str, Any]],
     project_selectors: dict[str, RepositorySelector],
+    tool_selectors: dict[str, RepositorySelector],
     work_selector: RepositorySelector,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     projects: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    tools: dict[str, list[dict[str, Any]]] = defaultdict(list)
     categories: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for item in results:
         group_name = classify_repository(
             item["path"],
             project_selectors,
+            tool_selectors,
             work_selector,
         )
         if group_name in PUBLIC_PROJECT_NAMES:
             projects[group_name].append(item)
+        elif group_name in PUBLIC_TOOL_NAMES:
+            tools[group_name].append(item)
         else:
             categories[group_name].append(item)
 
@@ -557,18 +586,24 @@ def group_results(
         for name in PUBLIC_PROJECT_NAMES
         if projects[name]
     ]
+    tool_stats = [
+        summarize_results(name, tools[name])
+        for name in PUBLIC_TOOL_NAMES
+        if tools[name]
+    ]
     category_stats = [
         summarize_results(name, categories[name])
         for name in PUBLIC_CATEGORY_NAMES
         if categories[name]
     ]
-    return project_stats, category_stats
+    return project_stats, tool_stats, category_stats
 
 
 def build_payload(
     results: list[dict[str, Any]],
     include_repositories: bool,
     project_selectors: dict[str, RepositorySelector],
+    tool_selectors: dict[str, RepositorySelector],
     work_selector: RepositorySelector,
 ) -> dict[str, Any]:
     commits = sum(item["commits"] for item in results)
@@ -593,9 +628,14 @@ def build_payload(
         if last is not None and (last_commit is None or last > last_commit):
             last_commit = last
 
-    projects, categories = group_results(results, project_selectors, work_selector)
+    projects, tools, categories = group_results(
+        results,
+        project_selectors,
+        tool_selectors,
+        work_selector,
+    )
     public_groups = sorted(
-        [*projects, *categories],
+        [*projects, *tools, *categories],
         key=lambda value: value["commits"],
         reverse=True,
     )
@@ -631,6 +671,7 @@ def build_payload(
             for period, values in sorted(by_month.items())
         ],
         "projects": projects,
+        "tools": tools,
         "categories": categories,
         # Compatibility field: it can be opted into, but now contains only
         # public-safe aggregated groups and never raw repository names.
@@ -686,6 +727,7 @@ def validate_public_payload(payload: dict[str, Any]) -> None:
         "byYear",
         "byMonth",
         "projects",
+        "tools",
         "categories",
         "repositories",
         "meta",
@@ -764,16 +806,24 @@ def validate_public_payload(payload: dict[str, Any]) -> None:
         raise ValueError("Statistics with scan errors cannot be published.")
 
     projects = payload.get("projects")
+    tools = payload.get("tools")
     categories = payload.get("categories")
-    if not isinstance(projects, list) or not isinstance(categories, list):
+    if (
+        not isinstance(projects, list)
+        or not isinstance(tools, list)
+        or not isinstance(categories, list)
+    ):
         raise ValueError("Statistics payload has invalid public grouping arrays.")
 
     project_names = {item.get("name") for item in projects if isinstance(item, dict)}
+    tool_names = {item.get("name") for item in tools if isinstance(item, dict)}
     category_names = {item.get("name") for item in categories if isinstance(item, dict)}
     if len(project_names) != len(projects) or not project_names.issubset(
         PUBLIC_PROJECT_NAMES
     ):
         raise ValueError("Statistics payload contains a non-public project name.")
+    if len(tool_names) != len(tools) or not tool_names.issubset(PUBLIC_TOOL_NAMES):
+        raise ValueError("Statistics payload contains a non-public tool name.")
     if len(category_names) != len(categories) or not category_names.issubset(
         PUBLIC_CATEGORY_NAMES
     ):
@@ -790,7 +840,7 @@ def validate_public_payload(payload: dict[str, Any]) -> None:
         "firstCommitAt",
         "lastCommitAt",
     }
-    for group in [*projects, *categories]:
+    for group in [*projects, *tools, *categories]:
         if set(group) != group_fields:
             raise ValueError("Statistics payload contains invalid public group fields.")
 
@@ -878,7 +928,7 @@ def command_run(args: argparse.Namespace) -> int:
     if args.include_repositories:
         include_repositories = True
 
-    project_selectors, work_selector = parse_grouping(config, base_dir)
+    project_selectors, tool_selectors, work_selector = parse_grouping(config, base_dir)
 
     output_value = args.output or config.get("output", ".codex/stats.json")
     output_path = resolve_path(str(output_value), base_dir)
@@ -895,7 +945,12 @@ def command_run(args: argparse.Namespace) -> int:
     errors = 0
 
     for index, repo in enumerate(repositories, start=1):
-        group_name = classify_repository(repo, project_selectors, work_selector)
+        group_name = classify_repository(
+            repo,
+            project_selectors,
+            tool_selectors,
+            work_selector,
+        )
         try:
             result, repository_duplicates = scan_repository(
                 repo,
@@ -932,6 +987,7 @@ def command_run(args: argparse.Namespace) -> int:
         results,
         include_repositories,
         project_selectors,
+        tool_selectors,
         work_selector,
     )
     payload["meta"]["scanErrors"] = errors
