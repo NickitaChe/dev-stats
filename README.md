@@ -213,6 +213,29 @@ dev-stats run
 dev-stats publish
 ```
 
+## Automated daily refresh
+
+The repository includes a scheduler-ready PowerShell entry point that always
+runs the complete privacy-safe pipeline in order: collect, validate, then
+publish to Cloudflare KV.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\update-and-publish.ps1
+```
+
+Use `-DryRun` to collect fresh data and validate the snapshot without changing
+the remote KV value:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\update-and-publish.ps1 -DryRun
+```
+
+Logs are written to the ignored `.codex/logs/` directory. Any repository scan
+error or privacy-validation failure stops the procedure before an unsafe or
+partial snapshot can be published.
+
 The Worker serves API routes from the `stats:current` KV value and Vite's
 `dist/` as static assets. A newly written KV value may take roughly a minute to
 become visible at every Cloudflare location.
